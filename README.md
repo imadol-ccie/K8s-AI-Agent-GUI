@@ -49,7 +49,7 @@ K8s-AI-Agent-GUI/
 1. **Clone the repository**
 
    ```bash
-   git clone https://github.com/balkanbgboy/K8s-AI-Agent-GUI.git
+   git clone https://github.com/imadol-ccie/K8s-AI-Agent-GUI.git
    cd K8s-AI-Agent-GUI
    ```
 
@@ -195,4 +195,4 @@ If you want to share the dashboard, put it behind a private tunnel like Tailscal
 
 ## Contributors
 
-- balkanbgboy
+- imadol-ccie
