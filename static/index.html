@@ -1,0 +1,682 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>K8s AI Agent</title>
+<style>
+  :root {
+    --bg: #0b0f0e;
+    --panel: #0f1513;
+    --panel-2: #131a18;
+    --border: #1f2a26;
+    --fg: #cfead8;
+    --muted: #6c8a7c;
+    --accent: #4ade80;
+    --accent-2: #22d3ee;
+    --warn: #fbbf24;
+    --err: #f87171;
+    --user: #93c5fd;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: ui-monospace, SFMono-Regular, "Cascadia Mono", Menlo, Consolas, monospace;
+    font-size: 13px;
+    line-height: 1.45;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  header {
+    flex: 0 0 auto;
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
+    align-items: center;
+    padding: 6px 14px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    color: var(--accent);
+  }
+  header .title { grid-column: 2; justify-self: center; letter-spacing: 1px; }
+  header .status { grid-column: 3; justify-self: end; }
+  header .title::before { content: "▎"; color: var(--accent); margin-right: 6px; }
+  header .status { color: var(--muted); font-size: 12px; }
+  header .status .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+    background: var(--muted); margin-right: 6px; vertical-align: middle; }
+  header .status.ok .dot { background: var(--accent); box-shadow: 0 0 6px var(--accent); }
+  header .status.err .dot { background: var(--err); box-shadow: 0 0 6px var(--err); }
+
+  main {
+    flex: 1 1 auto;
+    display: grid;
+    grid-template-columns: 1.2fr 1.4fr 1fr;
+    min-height: 0;
+    gap: 1px;
+    background: var(--border);
+  }
+  /* layout: cluster (left) | chat (middle) | manifests (right) */
+  .cluster-panel   { order: 1; }
+  .chat-panel      { order: 2; }
+  .manifests-panel { order: 3; }
+  .panel {
+    background: var(--panel);
+    display: flex; flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+  }
+  .panel-head {
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: space-between;
+    color: var(--accent-2);
+    font-size: 12px;
+  }
+  /* Boxed badge used as panel/section title */
+  .panel-title {
+    display: inline-block;
+    padding: 3px 12px;
+    background: rgba(34, 211, 238, 0.10);
+    border: 1px solid var(--accent-2);
+    border-radius: 3px;
+    color: var(--accent-2);
+    font-size: 11px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    font-weight: bold;
+    line-height: 1.4;
+  }
+  .panel-title.danger {
+    background: rgba(248, 113, 113, 0.08);
+    border-color: var(--err);
+    color: var(--err);
+  }
+  .panel-head .controls { display: flex; gap: 6px; align-items: center; }
+  .panel-body { flex: 1 1 auto; overflow: auto; padding: 10px 12px; }
+
+  /* ---- chat ---- */
+  /* Chat panel keeps messages + composer up at the top with a little gap */
+  .panel.chat-panel .panel-body {
+    flex: 0 0 auto;
+    max-height: 55vh;
+  }
+  #messages {
+    display: flex; flex-direction: column;
+    gap: 10px;
+    padding-bottom: 12px;        /* breathing room above the composer */
+  }
+  .msg { white-space: pre-wrap; word-wrap: break-word; }
+  .msg .role { color: var(--muted); margin-right: 8px; font-weight: bold; }
+  .msg .role::after { content: ":"; margin-left: 1px; font-weight: normal; }
+  .msg.user .role { color: var(--user); }
+  .msg.user .role::before { content: "$ "; font-weight: normal; }
+  .msg.assistant .role { color: var(--accent); }
+  .msg.assistant .role::before { content: "> "; font-weight: normal; }
+  .msg.error { color: var(--err); }
+  .msg.error .role { color: var(--err); }
+  .msg.error .role::before { content: "! "; font-weight: normal; }
+  .msg .example {
+    display: block;
+    color: var(--muted);
+    font-size: 11px;
+    margin-top: 4px;
+  }
+
+  .composer {
+    display: flex; gap: 8px; padding: 10px 12px;
+    border-top: 1px solid var(--border);
+    background: var(--panel-2);
+  }
+  .composer input {
+    flex: 1; background: #07100c; color: var(--fg);
+    border: 1px solid var(--border); border-radius: 4px;
+    padding: 8px 10px; font: inherit; outline: none;
+  }
+  .composer input:focus { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+  .composer button {
+    background: transparent; color: var(--accent);
+    border: 1px solid var(--accent); border-radius: 4px;
+    padding: 6px 14px; font: inherit; cursor: pointer;
+  }
+  .composer button:hover { background: rgba(74, 222, 128, 0.1); }
+  .composer button:disabled { color: var(--muted); border-color: var(--muted); cursor: not-allowed; }
+
+  /* ---- cluster ---- */
+  .ns-bar {
+    display: flex; gap: 6px; align-items: center;
+    flex-wrap: wrap;                /* if it gets really tight, wrap to a 2nd row */
+    justify-content: flex-end;
+    min-width: 0;
+  }
+  .ns-bar select, .ns-bar button {
+    background: #07100c; color: var(--fg);
+    border: 1px solid var(--border); border-radius: 3px;
+    padding: 3px 6px; font: inherit; cursor: pointer;
+  }
+  .ns-bar select {
+    max-width: 130px;                /* keep long context names from blowing up the bar */
+    text-overflow: ellipsis;
+    overflow: hidden;
+    white-space: nowrap;
+  }
+  .ns-bar button { color: var(--accent-2); border-color: var(--accent-2); }
+  .ns-bar button:hover { background: rgba(34, 211, 238, 0.1); }
+  .panel-head { gap: 8px; flex-wrap: wrap; }
+
+  .section { margin-bottom: 14px; }
+  .section h3 {
+    margin: 0 0 6px 0; font-size: 11px; color: var(--muted);
+    text-transform: uppercase; letter-spacing: 1px; font-weight: normal;
+    border-bottom: 1px dashed var(--border); padding-bottom: 3px;
+  }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th { text-align: left; color: var(--muted); font-weight: normal; padding: 3px 6px; }
+  td { padding: 3px 6px; border-top: 1px solid var(--border); }
+  td.ok { color: var(--accent); }
+  td.warn { color: var(--warn); }
+  td.err { color: var(--err); }
+  td.muted { color: var(--muted); }
+  .empty { color: var(--muted); font-style: italic; padding: 6px; }
+
+  /* ---- manifests ---- */
+  .manifest-list { display: flex; flex-direction: column; gap: 2px; }
+  .manifest-list a {
+    color: var(--fg); text-decoration: none; padding: 4px 6px; border-radius: 3px;
+    cursor: pointer; display: flex; justify-content: space-between; align-items: center;
+  }
+  .manifest-list a:hover { background: var(--panel-2); }
+  .manifest-list a.active { background: var(--panel-2); color: var(--accent); }
+  .manifest-list a .meta { color: var(--muted); font-size: 11px; }
+  pre.yaml {
+    background: #07100c; color: var(--fg);
+    padding: 10px; border-radius: 4px; border: 1px solid var(--border);
+    white-space: pre-wrap; word-wrap: break-word; max-height: 100%;
+    font-size: 12px; margin: 0;
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="title">K8s AI Agent</div>
+  <div class="status" id="apiStatus">
+    <span class="dot"></span>
+    <span id="apiStatusText">checking…</span>
+    <span id="apiStatusCtx" style="margin-left:8px;color:var(--muted);"></span>
+  </div>
+</header>
+
+<main>
+  <!-- Chat panel -->
+  <section class="panel chat-panel">
+    <div class="panel-head">
+      <span class="panel-title">CHAT</span>
+      <div class="controls">
+        <button id="resetBtn" title="Clear conversation">reset</button>
+      </div>
+    </div>
+    <div class="panel-body" id="messages"></div>
+    <form class="composer" id="composer">
+      <input id="input" autocomplete="off" placeholder="ask the agent..." />
+      <button type="submit" id="sendBtn">send</button>
+    </form>
+  </section>
+
+  <!-- Cluster panel -->
+  <section class="panel cluster-panel">
+    <div class="panel-head">
+      <span class="panel-title">CLUSTER</span>
+      <div class="ns-bar">
+        <label style="color:var(--muted);font-size:11px;text-transform:none;letter-spacing:0;">context</label>
+        <select id="ctxSelect" title="kubectl context"><option value="">(default)</option></select>
+        <label style="color:var(--muted);font-size:11px;text-transform:none;letter-spacing:0;">namespace</label>
+        <select id="nsSelect"><option value="default">default</option></select>
+        <button id="refreshBtn">refresh</button>
+      </div>
+    </div>
+    <div class="panel-body">
+      <div id="clusterError" style="display:none;color:var(--err);padding:8px 10px;border:1px solid var(--err);border-radius:4px;background:rgba(248,113,113,0.05);margin-bottom:10px;"></div>
+      <div id="clusterTables">
+        <div class="section">
+          <h3>deployments</h3>
+          <div id="deployments"><div class="empty">loading…</div></div>
+        </div>
+        <div class="section">
+          <h3>pods</h3>
+          <div id="pods"><div class="empty">loading…</div></div>
+        </div>
+        <div class="section">
+          <h3>services</h3>
+          <div id="services"><div class="empty">loading…</div></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Manifests panel -->
+  <section class="panel manifests-panel">
+    <div class="panel-head">
+      <span class="panel-title">MANIFESTS</span>
+      <div class="controls">
+        <button id="reloadManifestsBtn" style="background:transparent;color:var(--accent-2);border:1px solid var(--accent-2);border-radius:3px;padding:3px 8px;font:inherit;cursor:pointer;">reload</button>
+      </div>
+    </div>
+    <div class="panel-body" style="display:flex;flex-direction:column;gap:10px;">
+      <div class="manifest-list" id="manifestList"><div class="empty">no manifests yet</div></div>
+      <pre class="yaml" id="manifestView" style="display:none;"></pre>
+
+      <div class="delete-section" style="margin-top:14px;">
+        <div style="margin-bottom:8px;"><span class="panel-title danger">DELETE</span></div>
+        <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:6px 0;">
+          <select id="deleteSelect" style="flex:1;min-width:120px;max-width:100%;
+              background:#07100c;color:var(--fg);border:1px solid var(--border);
+              border-radius:3px;padding:3px 6px;font:inherit;">
+            <option value="">— pick a manifest —</option>
+          </select>
+          <button id="deleteBtn" disabled
+              style="background:transparent;color:var(--err);border:1px solid var(--err);
+              border-radius:3px;padding:3px 10px;font:inherit;cursor:pointer;">
+            delete
+          </button>
+        </div>
+        <pre id="deleteOutput" style="display:none;background:#07100c;color:var(--fg);
+            padding:8px;border-radius:3px;border:1px solid var(--border);font-size:11px;
+            margin:0;white-space:pre-wrap;word-wrap:break-word;"></pre>
+      </div>
+    </div>
+  </section>
+</main>
+
+<script>
+const state = {
+  sessionId: localStorage.getItem("k8sai_session") || null,
+  namespace: "default",
+  context: localStorage.getItem("k8sai_context") || "",
+  selectedManifest: null,
+};
+
+const $ = (id) => document.getElementById(id);
+const msgs = $("messages");
+
+function addMsg(role, text) {
+  const el = document.createElement("div");
+  el.className = "msg " + role;
+  const r = document.createElement("span");
+  r.className = "role";
+  r.textContent = role === "user" ? "you" : role === "error" ? "err" : "agent";
+  const body = document.createElement("span");
+  body.textContent = text;
+  el.appendChild(r);
+  el.appendChild(body);
+  msgs.appendChild(el);
+  msgs.scrollTop = msgs.scrollHeight;
+}
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, {
+    headers: { "Content-Type": "application/json" },
+    ...opts,
+  });
+  if (!res.ok) {
+    let detail = res.statusText;
+    try { detail = (await res.json()).detail || detail; } catch {}
+    throw new Error(detail);
+  }
+  return res.json();
+}
+
+// ---- chat ----
+$("composer").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const msg = $("input").value.trim();
+  if (!msg) return;
+  $("input").value = "";
+  $("sendBtn").disabled = true;
+  addMsg("user", msg);
+  try {
+    const r = await api("/chat", {
+      method: "POST",
+      body: JSON.stringify({ message: msg, session_id: state.sessionId }),
+    });
+    state.sessionId = r.session_id;
+    localStorage.setItem("k8sai_session", r.session_id);
+    addMsg("assistant", r.reply);
+    // a chat turn might have created new manifests / changed cluster state
+    loadManifests();
+    refreshCluster();
+  } catch (err) {
+    addMsg("error", err.message);
+  } finally {
+    $("sendBtn").disabled = false;
+    $("input").focus();
+  }
+});
+
+function addWelcome() {
+  const el = document.createElement("div");
+  el.className = "msg assistant";
+  const role = document.createElement("span");
+  role.className = "role"; role.textContent = "agent";
+  el.appendChild(role);
+  el.appendChild(document.createTextNode("Welcome. Ask me to create a Kubernetes deployment or service."));
+  const ex = document.createElement("span");
+  ex.className = "example";
+  ex.textContent = "(example: create a deployment named web-app using nginx with 2 replicas)";
+  el.appendChild(ex);
+  msgs.appendChild(el);
+}
+
+$("resetBtn").addEventListener("click", async () => {
+  if (state.sessionId) {
+    try { await fetch("/chat/reset?session_id=" + encodeURIComponent(state.sessionId), { method: "POST" }); } catch {}
+  }
+  state.sessionId = null;
+  localStorage.removeItem("k8sai_session");
+  msgs.innerHTML = "";
+  addWelcome();
+});
+
+// ---- contexts ----
+async function loadContexts() {
+  try {
+    const r = await api("/cluster/contexts");
+    const sel = $("ctxSelect");
+    sel.innerHTML = "";
+    for (const name of r.contexts) {
+      const opt = document.createElement("option");
+      opt.value = name; opt.textContent = name;
+      sel.appendChild(opt);
+    }
+    // Pick: stored choice if valid, else server's active, else kubeconfig current
+    const want = state.context || r.active || r.kubeconfig_current || "";
+    if (want && [...sel.options].some(o => o.value === want)) {
+      sel.value = want;
+    }
+    state.context = sel.value;
+    // Push our chosen context back to the server so kubectl calls use it
+    await fetch("/cluster/context", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: state.context || null }),
+    });
+    $("apiStatusCtx").textContent = state.context ? "context=" + state.context : "";
+    return true;
+  } catch (err) {
+    setApiStatus(false, err.message);
+    return false;
+  }
+}
+
+$("ctxSelect").addEventListener("change", async (e) => {
+  state.context = e.target.value;
+  localStorage.setItem("k8sai_context", state.context);
+  await fetch("/cluster/context", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name: state.context || null }),
+  });
+  $("apiStatusCtx").textContent = state.context ? "context=" + state.context : "";
+  loadNamespaces().then(refreshCluster);
+});
+
+// ---- cluster ----
+async function loadNamespaces() {
+  try {
+    const r = await api("/cluster/namespaces");
+    const sel = $("nsSelect");
+    const current = state.namespace;
+    sel.innerHTML = "";
+    // Special "all namespaces" entry first
+    const allOpt = document.createElement("option");
+    allOpt.value = "__all__";
+    allOpt.textContent = "(all namespaces)";
+    sel.appendChild(allOpt);
+    for (const ns of r.items) {
+      const opt = document.createElement("option");
+      opt.value = ns.name;
+      opt.textContent = ns.name;
+      sel.appendChild(opt);
+    }
+    if ([...sel.options].some(o => o.value === current)) sel.value = current;
+    state.namespace = sel.value;
+    setApiStatus(true);
+    return true;
+  } catch (err) {
+    setApiStatus(false, err.message);
+    return false;
+  }
+}
+
+function renderTable(container, headers, rows, rowFmt) {
+  if (!rows.length) { container.innerHTML = '<div class="empty">none</div>'; return; }
+  const t = document.createElement("table");
+  const thead = document.createElement("thead");
+  const trh = document.createElement("tr");
+  headers.forEach(h => { const th = document.createElement("th"); th.textContent = h; trh.appendChild(th); });
+  thead.appendChild(trh);
+  const tbody = document.createElement("tbody");
+  rows.forEach(row => {
+    const tr = document.createElement("tr");
+    rowFmt(row).forEach(([txt, cls]) => {
+      const td = document.createElement("td");
+      td.textContent = txt;
+      if (cls) td.className = cls;
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  });
+  t.appendChild(thead); t.appendChild(tbody);
+  container.innerHTML = ""; container.appendChild(t);
+}
+
+function showClusterError(msg) {
+  $("clusterError").style.display = "block";
+  $("clusterError").textContent = msg;
+  $("clusterTables").style.display = "none";
+}
+function hideClusterError() {
+  $("clusterError").style.display = "none";
+  $("clusterTables").style.display = "";
+}
+
+async function refreshCluster() {
+  const ns = state.namespace;
+  const showNs = ns === "__all__";
+  try {
+    const [dep, pod, svc] = await Promise.all([
+      api(`/cluster/deployments?namespace=${encodeURIComponent(ns)}`),
+      api(`/cluster/pods?namespace=${encodeURIComponent(ns)}`),
+      api(`/cluster/services?namespace=${encodeURIComponent(ns)}`),
+    ]);
+    hideClusterError();
+    const depHeaders = showNs ? ["namespace", "name", "ready", "replicas", "available"]
+                              : ["name", "ready", "replicas", "available"];
+    renderTable($("deployments"), depHeaders, dep.items, d => {
+      const base = [
+        [d.name],
+        [`${d.ready}/${d.replicas}`, d.ready === d.replicas && d.replicas > 0 ? "ok" : (d.replicas === 0 ? "" : "warn")],
+        [d.replicas],
+        [d.available],
+      ];
+      return showNs ? [[d.namespace, "muted"], ...base] : base;
+    });
+
+    const podHeaders = showNs ? ["namespace", "name", "ready", "status", "restarts"]
+                              : ["name", "ready", "status", "restarts"];
+    renderTable($("pods"), podHeaders, pod.items, p => {
+      const base = [
+        [p.name],
+        [p.ready, p.ready.split("/")[0] === p.ready.split("/")[1] && p.ready !== "0/0" ? "ok" : "warn"],
+        [p.status, p.status === "Running" ? "ok" : (p.status === "Failed" ? "err" : "warn")],
+        [p.restarts, p.restarts > 0 ? "warn" : ""],
+      ];
+      return showNs ? [[p.namespace, "muted"], ...base] : base;
+    });
+
+    const svcHeaders = showNs ? ["namespace", "name", "type", "cluster-ip", "ports"]
+                              : ["name", "type", "cluster-ip", "ports"];
+    renderTable($("services"), svcHeaders, svc.items, s => {
+      const base = [[s.name], [s.type], [s.cluster_ip], [s.ports]];
+      return showNs ? [[s.namespace, "muted"], ...base] : base;
+    });
+    setApiStatus(true);
+  } catch (err) {
+    setApiStatus(false, err.message);
+    showClusterError(err.message);
+  }
+}
+
+$("nsSelect").addEventListener("change", (e) => {
+  state.namespace = e.target.value;
+  refreshCluster();
+});
+$("refreshBtn").addEventListener("click", async () => {
+  await loadContexts();
+  await loadNamespaces();
+  refreshCluster();
+});
+
+// ---- manifests ----
+async function loadManifests() {
+  try {
+    const r = await api("/manifests");
+    const list = $("manifestList");
+    const sel = $("deleteSelect");
+    // Keep current delete-select value if it still exists in the list
+    const currentDeleteChoice = sel.value;
+    sel.innerHTML = '<option value="">— pick a manifest —</option>';
+
+    if (!r.files.length) {
+      list.innerHTML = '<div class="empty">no manifests yet</div>';
+      $("deleteBtn").disabled = true;
+      return;
+    }
+    list.innerHTML = "";
+    for (const f of r.files) {
+      const a = document.createElement("a");
+      a.innerHTML = `<span>${f.name}</span><span class="meta">${f.size}b</span>`;
+      if (state.selectedManifest === f.name) a.classList.add("active");
+      a.addEventListener("click", () => viewManifest(f.name));
+      list.appendChild(a);
+
+      // Also add to the delete dropdown
+      const opt = document.createElement("option");
+      opt.value = f.name; opt.textContent = f.name;
+      sel.appendChild(opt);
+    }
+    if ([...sel.options].some(o => o.value === currentDeleteChoice)) sel.value = currentDeleteChoice;
+    $("deleteBtn").disabled = !sel.value;
+  } catch (err) {
+    $("manifestList").innerHTML = `<div class="empty">${err.message}</div>`;
+  }
+}
+
+$("deleteSelect").addEventListener("change", (e) => {
+  $("deleteBtn").disabled = !e.target.value;
+});
+
+let _deleteOutputTimer = null;
+
+function scheduleDeleteOutputClear(ms) {
+  if (_deleteOutputTimer) clearTimeout(_deleteOutputTimer);
+  _deleteOutputTimer = setTimeout(() => {
+    const out = $("deleteOutput");
+    out.style.transition = "opacity 0.4s";
+    out.style.opacity = "0";
+    setTimeout(() => {
+      out.style.display = "none";
+      out.style.opacity = "1";
+      out.style.transition = "";
+      out.textContent = "";
+    }, 450);
+  }, ms);
+}
+
+$("deleteBtn").addEventListener("click", async () => {
+  const name = $("deleteSelect").value;
+  if (!name) return;
+  if (!confirm(`This will run:\n\n  kubectl delete -f k8s/${name}\n\nthen remove the local file.\n\nProceed?`)) return;
+
+  const out = $("deleteOutput");
+  if (_deleteOutputTimer) { clearTimeout(_deleteOutputTimer); _deleteOutputTimer = null; }
+  out.style.opacity = "1";
+  out.style.display = "block";
+  out.style.color = "var(--muted)";
+  out.textContent = `deleting ${name}...`;
+  $("deleteBtn").disabled = true;
+  try {
+    const r = await fetch("/manifests/" + encodeURIComponent(name), { method: "DELETE" });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || r.statusText);
+    out.style.color = "var(--accent)";
+    out.textContent = `deleted ${data.name}\n${data.kubectl_output}`;
+    // If we were viewing the deleted file, hide the viewer
+    if (state.selectedManifest === name) {
+      state.selectedManifest = null;
+      $("manifestView").style.display = "none";
+    }
+    loadManifests();
+    refreshCluster();
+    scheduleDeleteOutputClear(5000);   // auto-hide after 5s on success
+  } catch (err) {
+    out.style.color = "var(--err)";
+    out.textContent = `ERROR: ${err.message}`;
+    $("deleteBtn").disabled = false;
+    scheduleDeleteOutputClear(10000);  // give errors more time to read
+  }
+});
+
+async function viewManifest(name) {
+  const view = $("manifestView");
+  // Toggle: if this same file is already shown, hide the preview
+  if (state.selectedManifest === name && view.style.display !== "none") {
+    state.selectedManifest = null;
+    view.style.display = "none";
+    view.textContent = "";
+    loadManifests();
+    return;
+  }
+  try {
+    const r = await api("/manifests/" + encodeURIComponent(name));
+    state.selectedManifest = name;
+    view.textContent = r.content;
+    view.style.display = "block";
+    loadManifests();
+  } catch (err) {
+    addMsg("error", err.message);
+  }
+}
+
+$("reloadManifestsBtn").addEventListener("click", async () => {
+  const btn = $("reloadManifestsBtn");
+  const orig = btn.textContent;
+  btn.textContent = "reloading...";
+  btn.disabled = true;
+  try {
+    await Promise.all([loadManifests(), refreshCluster()]);
+    const count = document.querySelectorAll("#manifestList a").length;
+    btn.textContent = `reloaded (${count} file${count === 1 ? "" : "s"})`;
+  } catch {
+    btn.textContent = "error";
+  }
+  setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 1500);
+});
+
+// ---- status indicator ----
+function setApiStatus(ok, detail) {
+  const el = $("apiStatus");
+  el.classList.toggle("ok", !!ok);
+  el.classList.toggle("err", !ok);
+  $("apiStatusText").textContent = ok ? "kubectl ok" : (detail || "kubectl error");
+}
+
+// ---- boot ----
+addWelcome();
+loadContexts().then(loadNamespaces).then(refreshCluster);
+loadManifests();
+setInterval(refreshCluster, 10000);
+$("input").focus();
+</script>
+</body>
+</html>

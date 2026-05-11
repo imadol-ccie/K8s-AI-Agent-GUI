@@ -1,14 +1,64 @@
 import sys
 import os
+import platform
+import subprocess
+
 
 def _ensure_venv():
+    """Bootstrap a per-OS venv and install requirements before importing anything else.
+
+    Each OS gets its own venv directory so Windows and WSL/Linux can coexist
+    without nuking each other on every switch:
+
+      * `venv/`         — used if it already exists and matches the current OS
+      * `venv-windows/` — used otherwise on Windows
+      * `venv-linux/`   — used otherwise on Linux/WSL
+      * `venv-darwin/`  — used otherwise on macOS
+
+    First run on a given OS pays the one-time install cost; subsequent runs
+    just re-exec into the existing venv and are essentially instant.
+    """
     base = os.path.dirname(os.path.abspath(__file__))
-    # Windows path first, then Unix fallback
-    venv_python = os.path.join(base, "venv", "Scripts", "python.exe")
-    if not os.path.exists(venv_python):
-        venv_python = os.path.join(base, "venv", "bin", "python")
-    if os.path.exists(venv_python) and os.path.abspath(sys.executable) != os.path.abspath(venv_python):
+    is_windows = platform.system() == "Windows"
+    py_subpath = ("Scripts", "python.exe") if is_windows else ("bin", "python")
+
+    # Prefer the legacy ./venv if it already matches our OS.
+    default_venv = os.path.join(base, "venv")
+    default_python = os.path.join(default_venv, *py_subpath)
+    if os.path.exists(default_python):
+        venv_dir, venv_python = default_venv, default_python
+    else:
+        venv_dir = os.path.join(base, f"venv-{platform.system().lower()}")
+        venv_python = os.path.join(venv_dir, *py_subpath)
+
+    requirements = os.path.join(base, "requirements.txt")
+    marker = os.path.join(venv_dir, ".requirements-installed")
+
+    # Already running inside the chosen venv? Nothing to do.
+    if os.path.exists(venv_python) and os.path.abspath(sys.executable) == os.path.abspath(venv_python):
+        return
+
+    # Create the venv if missing (we no longer destroy any existing one).
+    if not os.path.isdir(venv_dir):
+        print(f"[setup] creating venv at {venv_dir} ...", flush=True)
+        subprocess.check_call([sys.executable, "-m", "venv", venv_dir])
+
+    # Install / update requirements only when requirements.txt is newer than the marker.
+    if os.path.exists(requirements):
+        req_mtime = os.path.getmtime(requirements)
+        marker_mtime = os.path.getmtime(marker) if os.path.exists(marker) else 0
+        if req_mtime > marker_mtime:
+            print("[setup] installing requirements — this can take 1-3 minutes on first run...", flush=True)
+            subprocess.check_call([venv_python, "-m", "pip", "install", "--upgrade", "pip"])
+            subprocess.check_call([venv_python, "-m", "pip", "install", "-r", requirements])
+            with open(marker, "w") as f:
+                f.write(str(req_mtime))
+            print("[setup] done.", flush=True)
+
+    # Re-exec under the venv python so all imports below run from the venv.
+    if os.path.abspath(sys.executable) != os.path.abspath(venv_python):
         os.execv(venv_python, [venv_python] + sys.argv)
+
 
 _ensure_venv()
 
@@ -54,14 +104,41 @@ def generate_deployment_yaml(name: str, image: str, replicas: int = 1, namespace
     }
     return yaml.dump(deployment, default_flow_style=False)
 
+# Active kubectl context — None means "use whatever kubectl's current-context is".
+# Set by the web GUI via set_active_context() so all kubectl calls (including
+# the agent's `kubectl apply`) target the cluster the user picked.
+_ACTIVE_CONTEXT: str | None = None
+
+
+def set_active_context(name: str | None) -> None:
+    global _ACTIVE_CONTEXT
+    _ACTIVE_CONTEXT = name or None
+
+
+def get_active_context() -> str | None:
+    return _ACTIVE_CONTEXT
+
+
+def _kubectl_cmd(args: list[str]) -> list[str]:
+    cmd = ["kubectl"]
+    if _ACTIVE_CONTEXT:
+        cmd += ["--context", _ACTIVE_CONTEXT]
+    return cmd + args
+
+
 def apply_yaml(yaml_content: str):
     with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
         f.write(yaml_content)
         temp_file = f.name
-    cmd = ["kubectl", "apply", "-f", temp_file]
+    cmd = _kubectl_cmd(["apply", "-f", temp_file])
     result = subprocess.run(cmd, capture_output=True, text=True)
     os.unlink(temp_file)
-    return result.stdout if result.returncode == 0 else result.stderr
+    if result.returncode == 0:
+        return f"SUCCESS: kubectl apply ok\n{result.stdout.strip()}"
+    return (
+        f"FAILED: kubectl apply returned exit code {result.returncode}. "
+        f"Nothing was deployed to the cluster.\nstderr: {result.stderr.strip()}"
+    )
 
 # --- Namespace Helper ---
 def generate_namespace_yaml(name: str):
@@ -207,7 +284,23 @@ tools = [create_deployment, create_service]
 
 # Prompt
 prompt = ChatPromptTemplate.from_messages([
-    ("system", "You are a helpful assistant that creates Kubernetes deployments and services. Before creating any deployment or service, first ask the user whether to deploy to the 'default' namespace or a different one. If they pick a different namespace, ask them for its exact name. The chosen namespace will be created automatically if it does not already exist. Never assume a namespace without asking."),
+    ("system",
+     "You are a helpful assistant that helps the user create Kubernetes deployments and services. "
+     "Respond naturally to whatever the user says. "
+     "For casual messages (greetings, small talk, questions about you), just reply briefly and "
+     "naturally — do NOT mention namespaces, deployments, or push the user toward an action. "
+     "Only when the user explicitly asks to create a deployment or a service, follow this flow: "
+     "1) If they have not already specified a namespace, ask whether to deploy to 'default' or a "
+     "different one (and if different, ask for the exact name). The chosen namespace is created "
+     "automatically if it doesn't exist. Never assume a namespace without asking. "
+     "2) Call the appropriate tool. "
+     "3) Tool outputs include 'SUCCESS:' or 'FAILED:' lines. You MUST NOT claim that anything "
+     "was created on the cluster if the tool output contains 'FAILED:'. In that case, tell the "
+     "user the apply failed, show the error message verbatim, and suggest checking the kubectl "
+     "context (the cluster the dashboard is pointing at). "
+     "4) Only when every step reports SUCCESS, finish your reply by briefly asking if there's "
+     "anything else they'd like to do — for example: 'Anything else? I can create another "
+     "deployment, add a service, or use a different namespace.' Keep the follow-up short."),
     MessagesPlaceholder(variable_name="chat_history"),
     ("human", "{input}"),
     MessagesPlaceholder(variable_name="agent_scratchpad"),
@@ -236,6 +329,18 @@ def extract_output(raw) -> str:
     return str(raw)
 
 
+def run_agent(user_input: str, chat_history: list) -> str:
+    """Invoke the agent for a single turn and append to chat_history in place."""
+    result = agent_executor.invoke({
+        "input": user_input,
+        "chat_history": chat_history,
+    })
+    output_text = extract_output(result.get("output", ""))
+    chat_history.append({"role": "human", "content": user_input})
+    chat_history.append({"role": "assistant", "content": output_text})
+    return output_text
+
+
 if __name__ == "__main__":
     print("🤖 Kubernetes AI Agent Initialized")
 
@@ -247,17 +352,8 @@ if __name__ == "__main__":
             if user_input.lower() in ["exit", "quit"]:
                 break
 
-            result = agent_executor.invoke({
-                "input": user_input,
-                "chat_history": chat_history,
-            })
-
-            output_text = extract_output(result.get("output", ""))
+            output_text = run_agent(user_input, chat_history)
             print("\nAgent Output:\n", output_text)
-
-            # Append this turn to history so the agent remembers it next round
-            chat_history.append({"role": "human", "content": user_input})
-            chat_history.append({"role": "assistant", "content": output_text})
 
         except Exception as e:
             print(f"❌ Error: {e}")
