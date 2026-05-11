@@ -238,6 +238,31 @@ def _ns_args(namespace: str) -> list[str]:
     return ["-n", namespace]
 
 
+def _age(timestamp: str) -> str:
+    """Format a K8s creationTimestamp like '2024-05-11T20:00:00Z' as '5s' / '12m' / '3h' / '2d'."""
+    if not timestamp:
+        return ""
+    from datetime import datetime, timezone
+    try:
+        created = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        seconds = int((datetime.now(timezone.utc) - created).total_seconds())
+    except Exception:
+        return ""
+    if seconds < 60:
+        return f"{max(seconds, 0)}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m"
+    if seconds < 86400:
+        return f"{seconds // 3600}h"
+    return f"{seconds // 86400}d"
+
+
+def _meta(i: dict) -> tuple[str, str, str]:
+    """Return (name, namespace, age) for a list-item from kubectl JSON."""
+    m = i.get("metadata", {})
+    return m.get("name", ""), m.get("namespace", ""), _age(m.get("creationTimestamp", ""))
+
+
 @app.get("/cluster/pods")
 def list_pods(namespace: str = "default"):
     data = _kubectl_json(["get", "pods", *_ns_args(namespace)])
@@ -288,6 +313,134 @@ def list_services(namespace: str = "default"):
             "type": spec.get("type", ""),
             "cluster_ip": spec.get("clusterIP", ""),
             "ports": ports,
+        })
+    return {"items": items}
+
+
+@app.get("/cluster/configmaps")
+def list_configmaps(namespace: str = "default"):
+    data = _kubectl_json(["get", "configmaps", *_ns_args(namespace)])
+    items = []
+    for i in data.get("items", []):
+        name, ns, age = _meta(i)
+        items.append({
+            "name": name, "namespace": ns,
+            "keys": len((i.get("data") or {}).keys()),
+            "age": age,
+        })
+    return {"items": items}
+
+
+@app.get("/cluster/secrets")
+def list_secrets(namespace: str = "default"):
+    data = _kubectl_json(["get", "secrets", *_ns_args(namespace)])
+    items = []
+    for i in data.get("items", []):
+        name, ns, age = _meta(i)
+        items.append({
+            "name": name, "namespace": ns,
+            "type": i.get("type", ""),
+            "keys": len((i.get("data") or {}).keys()),
+            "age": age,
+        })
+    return {"items": items}
+
+
+@app.get("/cluster/ingresses")
+def list_ingresses(namespace: str = "default"):
+    data = _kubectl_json(["get", "ingresses", *_ns_args(namespace)])
+    items = []
+    for i in data.get("items", []):
+        name, ns, age = _meta(i)
+        spec = i.get("spec", {})
+        status = i.get("status", {})
+        hosts = ",".join(r.get("host", "*") for r in spec.get("rules", []) if r.get("host"))
+        lb = status.get("loadBalancer", {}).get("ingress", [])
+        address = ",".join(x.get("ip") or x.get("hostname", "") for x in lb)
+        items.append({
+            "name": name, "namespace": ns,
+            "class": spec.get("ingressClassName", ""),
+            "hosts": hosts or "-",
+            "address": address or "-",
+            "age": age,
+        })
+    return {"items": items}
+
+
+@app.get("/cluster/pvcs")
+def list_pvcs(namespace: str = "default"):
+    data = _kubectl_json(["get", "persistentvolumeclaims", *_ns_args(namespace)])
+    items = []
+    for i in data.get("items", []):
+        name, ns, age = _meta(i)
+        spec = i.get("spec", {})
+        status = i.get("status", {})
+        capacity = (status.get("capacity") or {}).get("storage", "-")
+        items.append({
+            "name": name, "namespace": ns,
+            "status": status.get("phase", "Unknown"),
+            "volume": spec.get("volumeName", "-"),
+            "capacity": capacity,
+            "storage_class": spec.get("storageClassName", "-"),
+            "age": age,
+        })
+    return {"items": items}
+
+
+@app.get("/cluster/hpas")
+def list_hpas(namespace: str = "default"):
+    data = _kubectl_json(["get", "horizontalpodautoscalers", *_ns_args(namespace)])
+    items = []
+    for i in data.get("items", []):
+        name, ns, age = _meta(i)
+        spec = i.get("spec", {})
+        status = i.get("status", {})
+        ref = spec.get("scaleTargetRef", {})
+        items.append({
+            "name": name, "namespace": ns,
+            "reference": f"{ref.get('kind', '')}/{ref.get('name', '')}",
+            "min": spec.get("minReplicas", 0),
+            "max": spec.get("maxReplicas", 0),
+            "current": status.get("currentReplicas", 0) or 0,
+            "age": age,
+        })
+    return {"items": items}
+
+
+@app.get("/cluster/jobs")
+def list_jobs(namespace: str = "default"):
+    data = _kubectl_json(["get", "jobs", *_ns_args(namespace)])
+    items = []
+    for i in data.get("items", []):
+        name, ns, age = _meta(i)
+        spec = i.get("spec", {})
+        status = i.get("status", {})
+        items.append({
+            "name": name, "namespace": ns,
+            "completions": f"{status.get('succeeded', 0) or 0}/{spec.get('completions', 1)}",
+            "active": status.get("active", 0) or 0,
+            "failed": status.get("failed", 0) or 0,
+            "age": age,
+        })
+    return {"items": items}
+
+
+@app.get("/cluster/cronjobs")
+def list_cronjobs(namespace: str = "default"):
+    data = _kubectl_json(["get", "cronjobs", *_ns_args(namespace)])
+    items = []
+    for i in data.get("items", []):
+        name, ns, age = _meta(i)
+        spec = i.get("spec", {})
+        status = i.get("status", {})
+        last = status.get("lastScheduleTime", "")
+        items.append({
+            "name": name, "namespace": ns,
+            "schedule": spec.get("schedule", ""),
+            "suspend": "yes" if spec.get("suspend") else "no",
+            "active": len(status.get("active", []) or []),
+            "last_schedule": _age(last) if last else "-",
+            "age": age,
         })
     return {"items": items}
 

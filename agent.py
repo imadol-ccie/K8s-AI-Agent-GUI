@@ -126,18 +126,32 @@ def _kubectl_cmd(args: list[str]) -> list[str]:
     return cmd + args
 
 
-def apply_yaml(yaml_content: str):
+def _run_kubectl_apply(yaml_content: str, dry_run: bool = False) -> dict:
+    """Internal helper: run kubectl apply (optionally --dry-run=server).
+    Returns {'ok': bool, 'output': str}.
+    """
     with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
         f.write(yaml_content)
         temp_file = f.name
-    cmd = _kubectl_cmd(["apply", "-f", temp_file])
+    args = ["apply", "-f", temp_file]
+    if dry_run:
+        args.append("--dry-run=server")
+    cmd = _kubectl_cmd(args)
     result = subprocess.run(cmd, capture_output=True, text=True)
     os.unlink(temp_file)
-    if result.returncode == 0:
-        return f"SUCCESS: kubectl apply ok\n{result.stdout.strip()}"
+    return {
+        "ok": result.returncode == 0,
+        "output": (result.stdout if result.returncode == 0 else result.stderr).strip(),
+    }
+
+
+def apply_yaml(yaml_content: str):
+    r = _run_kubectl_apply(yaml_content, dry_run=False)
+    if r["ok"]:
+        return f"SUCCESS: kubectl apply ok\n{r['output']}"
     return (
-        f"FAILED: kubectl apply returned exit code {result.returncode}. "
-        f"Nothing was deployed to the cluster.\nstderr: {result.stderr.strip()}"
+        f"FAILED: kubectl apply returned an error. "
+        f"Nothing was deployed to the cluster.\nstderr: {r['output']}"
     )
 
 # --- Namespace Helper ---
@@ -280,27 +294,103 @@ def create_service(tool_input: str) -> str:
     return f"{ns_result}{kubectl_result}\nYAML saved to: {saved_path}"
 
 
-tools = [create_deployment, create_service]
+@tool
+def apply_kubernetes_manifest(yaml_content: str) -> str:
+    """Apply ANY Kubernetes resource by providing the full YAML manifest.
+
+    Use this for any resource type other than Deployment or Service —
+    ConfigMap, Secret, Ingress, PersistentVolumeClaim, HorizontalPodAutoscaler,
+    Job, CronJob, StatefulSet, DaemonSet, NetworkPolicy, ServiceAccount,
+    Role/RoleBinding, ResourceQuota, etc.
+
+    The YAML is first validated against the cluster with `kubectl apply
+    --dry-run=server`. Only if validation succeeds is the real apply executed.
+    Malformed manifests are caught early and the cluster is never touched.
+
+    IMPORTANT:
+      - You must already have asked the user which namespace to use BEFORE
+        calling this tool and embedded it in the YAML's metadata.namespace
+        (unless the resource is cluster-scoped, e.g. ClusterRole).
+      - For namespaced resources, include `metadata.namespace`. The namespace
+        will be auto-created if it doesn't exist.
+      - For Deployment or Service, prefer create_deployment / create_service
+        — they have safer defaults.
+
+    Input: a complete valid Kubernetes YAML manifest as a string. Example:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: app-config
+        namespace: default
+      data:
+        DB_HOST: postgres
+        LOG_LEVEL: info
+    """
+    yaml_content = yaml_content.strip()
+    # Parse the YAML to extract kind, name, namespace for file saving + namespace creation.
+    try:
+        doc = yaml.safe_load(yaml_content)
+    except yaml.YAMLError as e:
+        return f"FAILED: invalid YAML — could not parse.\nstderr: {e}"
+    if not isinstance(doc, dict):
+        return (
+            "FAILED: expected a single Kubernetes resource (a YAML dict at top level). "
+            "If you need to apply multiple resources, call this tool once per resource."
+        )
+    kind = doc.get("kind") or "Manifest"
+    meta = doc.get("metadata") or {}
+    name = meta.get("name") or "unnamed"
+    namespace = meta.get("namespace")
+
+    # Auto-create the namespace (if namespaced and not 'default')
+    ns_result = ensure_namespace(namespace) if namespace else ""
+
+    # Server-side dry-run validation
+    dry = _run_kubectl_apply(yaml_content, dry_run=True)
+    if not dry["ok"]:
+        return (
+            f"FAILED: server-side validation (--dry-run=server) rejected the YAML. "
+            f"Nothing was applied.\nstderr: {dry['output']}"
+        )
+
+    # Save the manifest, then do the real apply
+    saved_path = save_yaml_file(yaml_content, name, kind.lower())
+    apply_result = apply_yaml(yaml_content)
+    return f"{ns_result}{apply_result}\nYAML saved to: {saved_path}"
+
+
+tools = [create_deployment, create_service, apply_kubernetes_manifest]
 
 # Prompt
 prompt = ChatPromptTemplate.from_messages([
     ("system",
-     "You are a helpful assistant that helps the user create Kubernetes deployments and services. "
+     "You are a helpful assistant that helps the user create Kubernetes resources. "
      "Respond naturally to whatever the user says. "
      "For casual messages (greetings, small talk, questions about you), just reply briefly and "
      "naturally — do NOT mention namespaces, deployments, or push the user toward an action. "
-     "Only when the user explicitly asks to create a deployment or a service, follow this flow: "
-     "1) If they have not already specified a namespace, ask whether to deploy to 'default' or a "
-     "different one (and if different, ask for the exact name). The chosen namespace is created "
-     "automatically if it doesn't exist. Never assume a namespace without asking. "
-     "2) Call the appropriate tool. "
+     "\n\n"
+     "TOOL SELECTION when the user asks to create a Kubernetes resource:\n"
+     "  - Deployment → call create_deployment\n"
+     "  - Service → call create_service\n"
+     "  - Anything else (ConfigMap, Secret, Ingress, PersistentVolumeClaim, HPA, Job, CronJob, "
+     "StatefulSet, DaemonSet, NetworkPolicy, ServiceAccount, RBAC roles/bindings, ResourceQuota, "
+     "etc.) → generate the full YAML yourself and call apply_kubernetes_manifest with it. "
+     "The YAML is validated server-side before apply, so don't worry about a small mistake "
+     "wrecking the cluster — failed validation is caught and reported.\n"
+     "\n"
+     "FLOW for any resource creation:\n"
+     "1) If the resource is namespaced and the user has not specified a namespace, ask whether "
+     "to use 'default' or a different one (and if different, ask for the exact name). The "
+     "chosen namespace is created automatically if it doesn't exist. Never assume a namespace "
+     "without asking. Cluster-scoped resources (ClusterRole, ClusterRoleBinding, PersistentVolume, "
+     "Namespace itself, StorageClass, etc.) don't need this step.\n"
+     "2) Call the appropriate tool.\n"
      "3) Tool outputs include 'SUCCESS:' or 'FAILED:' lines. You MUST NOT claim that anything "
      "was created on the cluster if the tool output contains 'FAILED:'. In that case, tell the "
      "user the apply failed, show the error message verbatim, and suggest checking the kubectl "
-     "context (the cluster the dashboard is pointing at). "
+     "context (the cluster the dashboard is pointing at).\n"
      "4) Only when every step reports SUCCESS, finish your reply by briefly asking if there's "
-     "anything else they'd like to do — for example: 'Anything else? I can create another "
-     "deployment, add a service, or use a different namespace.' Keep the follow-up short."),
+     "anything else they'd like to do. Keep the follow-up short."),
     MessagesPlaceholder(variable_name="chat_history"),
     ("human", "{input}"),
     MessagesPlaceholder(variable_name="agent_scratchpad"),

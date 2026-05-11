@@ -250,6 +250,34 @@
           <h3>services</h3>
           <div id="services"><div class="empty">loading…</div></div>
         </div>
+        <div class="section">
+          <h3>ingresses</h3>
+          <div id="ingresses"><div class="empty">loading…</div></div>
+        </div>
+        <div class="section">
+          <h3>configmaps</h3>
+          <div id="configmaps"><div class="empty">loading…</div></div>
+        </div>
+        <div class="section">
+          <h3>secrets</h3>
+          <div id="secrets"><div class="empty">loading…</div></div>
+        </div>
+        <div class="section">
+          <h3>pvcs</h3>
+          <div id="pvcs"><div class="empty">loading…</div></div>
+        </div>
+        <div class="section">
+          <h3>hpas</h3>
+          <div id="hpas"><div class="empty">loading…</div></div>
+        </div>
+        <div class="section">
+          <h3>jobs</h3>
+          <div id="jobs"><div class="empty">loading…</div></div>
+        </div>
+        <div class="section">
+          <h3>cronjobs</h3>
+          <div id="cronjobs"><div class="empty">loading…</div></div>
+        </div>
       </div>
     </div>
   </section>
@@ -359,10 +387,10 @@ function addWelcome() {
   const role = document.createElement("span");
   role.className = "role"; role.textContent = "agent";
   el.appendChild(role);
-  el.appendChild(document.createTextNode("Welcome. Ask me to create a Kubernetes deployment or service."));
+  el.appendChild(document.createTextNode("Welcome. Ask me to create any Kubernetes resource — Deployment, Service, ConfigMap, Secret, Ingress, PVC, HPA, Job, CronJob, NetworkPolicy, RBAC, and more."));
   const ex = document.createElement("span");
   ex.className = "example";
-  ex.textContent = "(example: create a deployment named web-app using nginx with 2 replicas)";
+  ex.textContent = "(example: create a deployment named web-app using nginx with 2 replicas; or: create a configmap app-config with DB_HOST=postgres)";
   el.appendChild(ex);
   msgs.appendChild(el);
 }
@@ -480,50 +508,94 @@ function hideClusterError() {
   $("clusterTables").style.display = "";
 }
 
-async function refreshCluster() {
+// Helper: fetch one cluster resource and render its table.
+// If the request fails (e.g. unreachable cluster), shows the error in the section.
+async function loadResource(endpoint, container, baseHeaders, rowFmt) {
   const ns = state.namespace;
   const showNs = ns === "__all__";
   try {
-    const [dep, pod, svc] = await Promise.all([
-      api(`/cluster/deployments?namespace=${encodeURIComponent(ns)}`),
-      api(`/cluster/pods?namespace=${encodeURIComponent(ns)}`),
-      api(`/cluster/services?namespace=${encodeURIComponent(ns)}`),
-    ]);
-    hideClusterError();
-    const depHeaders = showNs ? ["namespace", "name", "ready", "replicas", "available"]
-                              : ["name", "ready", "replicas", "available"];
-    renderTable($("deployments"), depHeaders, dep.items, d => {
-      const base = [
+    const r = await api(`${endpoint}?namespace=${encodeURIComponent(ns)}`);
+    const headers = showNs ? ["namespace", ...baseHeaders] : baseHeaders;
+    renderTable(container, headers, r.items, row => {
+      const base = rowFmt(row);
+      return showNs ? [[row.namespace, "muted"], ...base] : base;
+    });
+    return { ok: true };
+  } catch (err) {
+    container.innerHTML = `<div class="empty">${err.message}</div>`;
+    return { ok: false, err };
+  }
+}
+
+async function refreshCluster() {
+  const results = await Promise.allSettled([
+    loadResource("/cluster/deployments", $("deployments"),
+      ["name", "ready", "replicas", "available"],
+      d => [
         [d.name],
         [`${d.ready}/${d.replicas}`, d.ready === d.replicas && d.replicas > 0 ? "ok" : (d.replicas === 0 ? "" : "warn")],
         [d.replicas],
         [d.available],
-      ];
-      return showNs ? [[d.namespace, "muted"], ...base] : base;
-    });
-
-    const podHeaders = showNs ? ["namespace", "name", "ready", "status", "restarts"]
-                              : ["name", "ready", "status", "restarts"];
-    renderTable($("pods"), podHeaders, pod.items, p => {
-      const base = [
+      ]),
+    loadResource("/cluster/pods", $("pods"),
+      ["name", "ready", "status", "restarts"],
+      p => [
         [p.name],
         [p.ready, p.ready.split("/")[0] === p.ready.split("/")[1] && p.ready !== "0/0" ? "ok" : "warn"],
         [p.status, p.status === "Running" ? "ok" : (p.status === "Failed" ? "err" : "warn")],
         [p.restarts, p.restarts > 0 ? "warn" : ""],
-      ];
-      return showNs ? [[p.namespace, "muted"], ...base] : base;
-    });
+      ]),
+    loadResource("/cluster/services", $("services"),
+      ["name", "type", "cluster-ip", "ports"],
+      s => [[s.name], [s.type], [s.cluster_ip], [s.ports]]),
+    loadResource("/cluster/ingresses", $("ingresses"),
+      ["name", "class", "hosts", "address", "age"],
+      i => [[i.name], [i.class || "-"], [i.hosts], [i.address], [i.age, "muted"]]),
+    loadResource("/cluster/configmaps", $("configmaps"),
+      ["name", "keys", "age"],
+      c => [[c.name], [c.keys], [c.age, "muted"]]),
+    loadResource("/cluster/secrets", $("secrets"),
+      ["name", "type", "keys", "age"],
+      s => [[s.name], [s.type], [s.keys], [s.age, "muted"]]),
+    loadResource("/cluster/pvcs", $("pvcs"),
+      ["name", "status", "capacity", "storage-class", "age"],
+      p => [
+        [p.name],
+        [p.status, p.status === "Bound" ? "ok" : (p.status === "Lost" ? "err" : "warn")],
+        [p.capacity], [p.storage_class], [p.age, "muted"],
+      ]),
+    loadResource("/cluster/hpas", $("hpas"),
+      ["name", "reference", "min", "max", "current", "age"],
+      h => [
+        [h.name], [h.reference], [h.min], [h.max],
+        [h.current, h.current >= h.min ? "ok" : "warn"],
+        [h.age, "muted"],
+      ]),
+    loadResource("/cluster/jobs", $("jobs"),
+      ["name", "completions", "active", "failed", "age"],
+      j => [
+        [j.name], [j.completions], [j.active],
+        [j.failed, j.failed > 0 ? "err" : ""], [j.age, "muted"],
+      ]),
+    loadResource("/cluster/cronjobs", $("cronjobs"),
+      ["name", "schedule", "suspend", "active", "last", "age"],
+      c => [
+        [c.name], [c.schedule],
+        [c.suspend, c.suspend === "yes" ? "warn" : ""],
+        [c.active], [c.last_schedule, "muted"], [c.age, "muted"],
+      ]),
+  ]);
 
-    const svcHeaders = showNs ? ["namespace", "name", "type", "cluster-ip", "ports"]
-                              : ["name", "type", "cluster-ip", "ports"];
-    renderTable($("services"), svcHeaders, svc.items, s => {
-      const base = [[s.name], [s.type], [s.cluster_ip], [s.ports]];
-      return showNs ? [[s.namespace, "muted"], ...base] : base;
-    });
+  // Treat the deployments fetch as the "is the cluster reachable" canary.
+  // (All endpoints would fail the same way for cluster-unreachable errors.)
+  const canary = results[0];
+  if (canary.status === "fulfilled" && canary.value.ok) {
+    hideClusterError();
     setApiStatus(true);
-  } catch (err) {
-    setApiStatus(false, err.message);
-    showClusterError(err.message);
+  } else {
+    const err = canary.status === "rejected" ? canary.reason : canary.value.err;
+    setApiStatus(false, err?.message || "cluster error");
+    showClusterError(err?.message || "cluster error");
   }
 }
 

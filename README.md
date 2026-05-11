@@ -1,6 +1,6 @@
 # K8s AI Agent — Web Dashboard
 
-A conversational AI agent for Kubernetes with a built-in web dashboard. Talk to it in natural language to create Deployments and Services, watch your cluster live, view the generated YAML, and delete resources — all from one page in your browser.
+A conversational AI agent for Kubernetes with a built-in web dashboard. Talk to it in natural language to create any Kubernetes resource — Deployments, Services, ConfigMaps, Secrets, Ingresses, PVCs, HPAs, Jobs, CronJobs, NetworkPolicies, RBAC, and more — watch your cluster live, view the generated YAML, and delete resources, all from one page in your browser.
 
 Powered by Google Gemini and LangChain. The agent runs `kubectl` against whatever Kubernetes context you pick (minikube, kind, EKS, GKE, AKS, any on‑prem cluster — it doesn't care).
 
@@ -8,14 +8,14 @@ Powered by Google Gemini and LangChain. The agent runs `kubectl` against whateve
 
 ## Features
 
-- **Natural-language agent** — `create a deployment named web-app using nginx with 3 replicas` and it does it
+- **Natural-language agent for any K8s resource** — say `create a deployment named web-app using nginx with 3 replicas` or `create a configmap app-config with DB_HOST=postgres` or `create a network policy that only allows traffic to web-app from pods labeled tier=frontend` — the agent generates the YAML and applies it. Common resources have dedicated tools with safe defaults; everything else is handled by a generic `apply_kubernetes_manifest` tool with **server-side dry-run validation** before each apply
 - **Web dashboard** with three panels:
-  - **Cluster** — live view of deployments / pods / services, switchable per namespace (or "all namespaces"), auto-refreshes every 10s
+  - **Cluster** — live view of **deployments, pods, services, ingresses, configmaps, secrets, PVCs, HPAs, jobs, and cronjobs**, switchable per namespace (or "all namespaces"), auto-refreshes every 10s. Each section degrades independently — one failing fetch doesn't blank the others
   - **Chat** — terminal-style conversation with the agent, session reset, welcome prompt with example
   - **Manifests** — list and preview every YAML file the agent generated under `k8s/`; click a file to view, click again to hide
   - **Delete sub-section** — pick a manifest, click delete → runs `kubectl delete -f` then removes the local file; output auto-hides after 5s (10s on errors)
 - **Multi-cluster support** — context dropdown lists every cluster in your kubeconfig; pick any of them and the agent + dashboard target that cluster (`kubectl --context=<picked> ...`)
-- **Honest error reporting** — kubectl failures are surfaced verbatim instead of the agent claiming false success; "no cluster reachable" is distilled to a one-line friendly message
+- **Honest error reporting** — kubectl failures are surfaced verbatim instead of the agent claiming false success; malformed YAML is caught by `--dry-run=server` before the real apply; "no cluster reachable" is distilled to a one-line friendly message
 - **Auto-bootstrap** — first run creates a per-OS venv (`venv-linux/`, `venv-windows/`, …) and installs all requirements; subsequent runs are instant
 - **Auto-open browser** — `python server.py` opens http://127.0.0.1:8000 automatically (Windows / macOS / native Linux / WSL all supported)
 
@@ -81,14 +81,28 @@ K8s-AI-Agent-GUI/
 
 **Pick a namespace.** Use the `namespace` dropdown for scoped views, or pick `(all namespaces)` for a cluster-wide view with a namespace column.
 
-**Talk to the agent.** Type `create a deployment named web-app using nginx with 3 replicas` in the **CHAT** panel. The agent will:
+**Talk to the agent.** Type something like one of these in the **CHAT** panel:
 
-1. Ask whether to use `default` or another namespace
-2. Generate the YAML, save it to `k8s/`, and `kubectl apply` it
-3. If the namespace doesn't exist, create it first
-4. Confirm success and ask if you'd like to do anything else
+```
+create a deployment named web-app using nginx with 3 replicas
+create a service for web-app on port 80 type ClusterIP
+create a configmap app-config with DB_HOST=postgres and LOG_LEVEL=info
+create a secret named db-creds with username=admin and password=changeme
+create an ingress for web-app on host example.com routing to web-app-svc port 80
+create a horizontal pod autoscaler for web-app scaling between 2 and 10 on 70% CPU
+create a cronjob that runs busybox every minute and prints hello
+create a network policy that only allows traffic to web-app from pods labeled tier=frontend
+```
 
-The cluster panel and manifests list refresh automatically after each agent action, so you see the new deployment appear immediately.
+The agent will:
+
+1. Ask whether to use `default` or another namespace (for namespaced resources)
+2. Generate the YAML and run `kubectl apply --dry-run=server` to validate
+3. If validation passes, save the YAML to `k8s/` and do the real apply
+4. If the namespace doesn't exist, create it first
+5. Confirm success — or surface the verbatim kubectl error if anything failed — and ask if you'd like to do anything else
+
+The cluster panel and manifests list refresh automatically after each agent action, so newly created resources appear immediately in the relevant section.
 
 **Delete a resource.** In the **MANIFESTS** panel, scroll to the **DELETE** sub-section, pick a manifest from the dropdown, click delete. Confirms first, then runs `kubectl delete -f` against the active context, then removes the local YAML file.
 
@@ -129,21 +143,17 @@ The exact steps depend on cluster type, but it's all standard kubectl stuff — 
 
 After adding the context, click **refresh** in the dashboard's CLUSTER panel — it will appear in the dropdown.
 
-### Tool input formats (for the LLM)
+### Tools the agent has access to
 
-The agent uses these tool signatures internally:
+The agent calls one of three tools internally based on what you ask for. You don't usually need to know about these — speak naturally and the LLM picks the right one.
 
-**create_deployment**
-```
-name: <name>, image: <image>, replicas: <n>, namespace: <namespace>
-```
+| Tool | When the LLM uses it |
+|---|---|
+| `create_deployment` | Anything that maps to a Deployment. Has safe defaults: 1 replica, port 80, namespace `default`. |
+| `create_service` | Anything that maps to a Service (ClusterIP / NodePort / LoadBalancer). |
+| `apply_kubernetes_manifest` | **Everything else** — ConfigMap, Secret, Ingress, PVC, HPA, Job, CronJob, StatefulSet, DaemonSet, NetworkPolicy, ServiceAccount, RBAC roles/bindings, ResourceQuota, etc. The LLM emits the full YAML; the tool validates it server-side (`kubectl apply --dry-run=server`) before applying. Failed validation is reported and the cluster is not touched. |
 
-**create_service**
-```
-name: <name>, port: <port>, type: ClusterIP|NodePort|LoadBalancer, namespace: <namespace>
-```
-
-You don't usually need to type these — speak naturally and the LLM will fill them in.
+All three save the resulting YAML to `k8s/` so you can re-apply or inspect anything outside the app.
 
 ## Generated Manifests
 
